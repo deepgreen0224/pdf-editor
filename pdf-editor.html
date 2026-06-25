@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF 편집기</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; }
+.toolbar {
+  position: sticky; top: 0; z-index: 100;
+  background: #16213e; padding: 12px 20px;
+  display: flex; align-items: center; gap: 12px;
+  border-bottom: 2px solid #0f3460;
+  flex-wrap: wrap;
+}
+.toolbar h1 { font-size: 1.2rem; color: #e94560; margin-right: 12px; }
+button {
+  background: #0f3460; color: #e0e0e0; border: none;
+  padding: 8px 16px; border-radius: 6px; cursor: pointer;
+  font-size: 0.85rem; transition: background 0.2s;
+}
+button:hover { background: #e94560; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+.page-count { margin-left: auto; font-size: 0.85rem; color: #999; }
+#drop-zone {
+  border: 3px dashed #0f3460; border-radius: 12px;
+  padding: 60px 20px; text-align: center; margin: 20px;
+  transition: border-color 0.3s, background 0.3s;
+}
+#drop-zone.drag-over { border-color: #e94560; background: rgba(233,69,96,0.1); }
+#drop-zone p { font-size: 1.1rem; color: #888; }
+#pages-container {
+  display: flex; flex-wrap: wrap; gap: 16px;
+  padding: 20px; justify-content: center;
+}
+.page-card {
+  background: #16213e; border-radius: 8px; padding: 8px;
+  width: 180px; cursor: grab; position: relative;
+  border: 2px solid transparent; transition: border-color 0.2s, transform 0.2s;
+  user-select: none;
+}
+.page-card:hover { border-color: #0f3460; }
+.page-card.selected { border-color: #e94560; }
+.page-card.dragging { opacity: 0.5; transform: scale(0.95); }
+.page-card.drag-target { border-color: #53d8fb; border-style: dashed; }
+.page-card canvas {
+  width: 100%; border-radius: 4px; display: block;
+  background: white;
+}
+.page-info {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 6px; font-size: 0.75rem; color: #999;
+}
+.page-actions {
+  display: flex; gap: 4px;
+}
+.page-actions button {
+  padding: 4px 8px; font-size: 0.7rem; background: #1a1a2e;
+}
+.page-num {
+  background: #e94560; color: white; border-radius: 50%;
+  width: 22px; height: 22px; display: flex; align-items: center;
+  justify-content: center; font-size: 0.7rem; font-weight: bold;
+  position: absolute; top: -6px; left: -6px;
+}
+.file-label {
+  font-size: 0.6rem; color: #666; text-align: center;
+  margin-top: 2px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; max-width: 164px;
+}
+#file-input { display: none; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <h1>PDF 편집기</h1>
+  <button onclick="document.getElementById('file-input').click()">📂 PDF 불러오기</button>
+  <button onclick="selectAll()">☑ 전체 선택</button>
+  <button onclick="deleteSelected()">🗑 선택 삭제</button>
+  <button onclick="rotateSelected(-90)">↺ 왼쪽 회전</button>
+  <button onclick="rotateSelected(90)">↻ 오른쪽 회전</button>
+  <button onclick="downloadPDF()" id="btn-download">💾 PDF 다운로드</button>
+  <input type="file" id="file-input" accept=".pdf" multiple>
+  <span class="page-count" id="page-count"></span>
+</div>
+
+<div id="drop-zone">
+  <p>PDF 파일을 여기에 끌어다 놓거나 [PDF 불러오기] 버튼을 클릭하세요</p>
+</div>
+
+<div id="pages-container"></div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+let pages = []; // { id, pdfBytes, pageIndex, rotation, fileName }
+let nextId = 0;
+let dragSrcId = null;
+
+const container = document.getElementById('pages-container');
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+
+fileInput.addEventListener('change', e => {
+  handleFiles(e.target.files);
+  fileInput.value = '';
+});
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  const files = [...e.dataTransfer.files].filter(f => f.type === 'application/pdf');
+  if (files.length) handleFiles(files);
+});
+
+async function handleFiles(files) {
+  for (const file of files) {
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    const pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+    for (let i = 0; i < pdf.numPages; i++) {
+      pages.push({ id: nextId++, pdfBytes: bytes, pageIndex: i, rotation: 0, fileName: file.name });
+    }
+  }
+  dropZone.style.display = 'none';
+  renderAll();
+}
+
+async function renderAll() {
+  container.innerHTML = '';
+  document.getElementById('page-count').textContent = `총 ${pages.length}페이지`;
+  for (let i = 0; i < pages.length; i++) {
+    const p = pages[i];
+    const card = document.createElement('div');
+    card.className = 'page-card';
+    card.dataset.id = p.id;
+    card.draggable = true;
+    card.innerHTML = `
+      <div class="page-num">${i + 1}</div>
+      <canvas></canvas>
+      <div class="file-label" title="${p.fileName}">${p.fileName} (p${p.pageIndex + 1})</div>
+      <div class="page-info">
+        <span>${p.rotation}°</span>
+        <div class="page-actions">
+          <button onclick="rotatePage(${p.id},-90)" title="왼쪽 회전">↺</button>
+          <button onclick="rotatePage(${p.id},90)" title="오른쪽 회전">↻</button>
+          <button onclick="deletePage(${p.id})" title="삭제">✕</button>
+        </div>
+      </div>
+    `;
+    card.addEventListener('click', e => {
+      if (e.target.tagName === 'BUTTON') return;
+      card.classList.toggle('selected');
+    });
+    card.addEventListener('dragstart', e => {
+      dragSrcId = p.id;
+      card.classList.add('dragging');
+    });
+    card.addEventListener('dragend', () => {
+      card.classList.remove('dragging');
+      document.querySelectorAll('.drag-target').forEach(el => el.classList.remove('drag-target'));
+    });
+    card.addEventListener('dragover', e => {
+      e.preventDefault();
+      card.classList.add('drag-target');
+    });
+    card.addEventListener('dragleave', () => card.classList.remove('drag-target'));
+    card.addEventListener('drop', e => {
+      e.preventDefault();
+      card.classList.remove('drag-target');
+      const targetId = p.id;
+      if (dragSrcId === targetId) return;
+      const srcIdx = pages.findIndex(x => x.id === dragSrcId);
+      const tgtIdx = pages.findIndex(x => x.id === targetId);
+      const [moved] = pages.splice(srcIdx, 1);
+      pages.splice(tgtIdx, 0, moved);
+      renderAll();
+    });
+
+    container.appendChild(card);
+    renderThumb(card.querySelector('canvas'), p);
+  }
+}
+
+async function renderThumb(canvas, page) {
+  const pdf = await pdfjsLib.getDocument({ data: page.pdfBytes.slice() }).promise;
+  const pg = await pdf.getPage(page.pageIndex + 1);
+  const rot = ((pg.rotate || 0) + page.rotation) % 360;
+  const vp = pg.getViewport({ scale: 1, rotation: rot });
+  const scale = 164 / Math.max(vp.width, vp.height);
+  const viewport = pg.getViewport({ scale, rotation: rot });
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  await pg.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+}
+
+function rotatePage(id, deg) {
+  const p = pages.find(x => x.id === id);
+  p.rotation = (p.rotation + deg + 360) % 360;
+  renderAll();
+}
+
+function deletePage(id) {
+  pages = pages.filter(x => x.id !== id);
+  if (!pages.length) dropZone.style.display = '';
+  renderAll();
+}
+
+function selectAll() {
+  const cards = document.querySelectorAll('.page-card');
+  const allSelected = [...cards].every(c => c.classList.contains('selected'));
+  cards.forEach(c => c.classList.toggle('selected', !allSelected));
+}
+
+function deleteSelected() {
+  const ids = new Set([...document.querySelectorAll('.page-card.selected')].map(c => +c.dataset.id));
+  if (!ids.size) return;
+  pages = pages.filter(p => !ids.has(p.id));
+  if (!pages.length) dropZone.style.display = '';
+  renderAll();
+}
+
+function rotateSelected(deg) {
+  const ids = new Set([...document.querySelectorAll('.page-card.selected')].map(c => +c.dataset.id));
+  if (!ids.size) return;
+  pages.forEach(p => { if (ids.has(p.id)) p.rotation = (p.rotation + deg + 360) % 360; });
+  renderAll();
+}
+
+async function downloadPDF() {
+  if (!pages.length) return;
+  const out = await PDFLib.PDFDocument.create();
+  for (const p of pages) {
+    const src = await PDFLib.PDFDocument.load(p.pdfBytes);
+    const [copied] = await out.copyPages(src, [p.pageIndex]);
+    const existing = copied.getRotation().angle || 0;
+    copied.setRotation(PDFLib.degrees((existing + p.rotation) % 360));
+    out.addPage(copied);
+  }
+  const bytes = await out.save();
+  const blob = new Blob([bytes], { type: 'application/pdf' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'edited.pdf';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+</script>
+</body>
+</html>
